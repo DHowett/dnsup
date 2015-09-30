@@ -2,7 +2,7 @@
 
 Pulls IPs from interfaces, joins them with partial IPs specified in the config file, and sends a RFC 2136-compliant update to a specified server.
 
-# Config file
+# Config File
 
 ```
 server: "ipaddr:53"
@@ -18,4 +18,30 @@ hosts:
 ttl: 300
 ```
 
-In the above example, `"@": "0.0.0.0/32"` updates `fully.qualified.update.zone.` to match the IPv4 address pulled from the v4 interface, and hosts 1-3 to the first 64 bits of the IPv6 address from the v6 interface, plus the last 64 bits specified in the config file.
+As in BIND, `@` is shorthand for the root of the zone.
+
+While the host entries look like CIDR notation, they truly specify the prefix of the interface IP to merge with.
+That is to say, `0.0.0.9/24` + `1.2.3.4` yields `1.2.3.9`.
+
+# Example Scenario
+
+Imagine the following situation:
+
+```
+eth0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500
+        inet 198.100.123.139  netmask 255.255.255.0  broadcast 10.128.3.255
+
+eth1: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500
+        inet6 2001:470:1f0e:83f::2  prefixlen 64  scopeid 0x0<global>
+```
+
+```
+$ dnsup -4 eth0 -6 eth1 -c example.yml
+```
+
+The following updates will be made:
+
+* fully.qualified.update.zone. -> 198.100.123.139
+* host1.fully.qualified.update.zone. -> 2001:0470:1f0e:083f:1234:1234:1234:1234
+* host2.fully.qualified.update.zone. -> 2001:0470:1f0e:083f:def0:0dea:dbee:f000
+* host3.fully.qualified.update.zone. -> 2001:0470:1f0e:083f:abcd:ef01:0234:5678
