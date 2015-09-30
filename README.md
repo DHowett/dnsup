@@ -41,7 +41,7 @@ $ dnsup -4 eth0 -6 eth1 -c example.yml
 
 The following updates will be made:
 
-* fully.qualified.update.zone. -> 198.100.123.139
-* host1.fully.qualified.update.zone. -> 2001:0470:1f0e:083f:1234:1234:1234:1234
-* host2.fully.qualified.update.zone. -> 2001:0470:1f0e:083f:def0:0dea:dbee:f000
-* host3.fully.qualified.update.zone. -> 2001:0470:1f0e:083f:abcd:ef01:0234:5678
+* fully.qualified.update.zone. -> `198.100.123.139`
+* host1.fully.qualified.update.zone. -> `2001:0470:1f0e:083f:1234:1234:1234:1234`
+* host2.fully.qualified.update.zone. -> `2001:0470:1f0e:083f:def0:0dea:dbee:f000`
+* host3.fully.qualified.update.zone. -> `2001:0470:1f0e:083f:abcd:ef01:0234:5678`
