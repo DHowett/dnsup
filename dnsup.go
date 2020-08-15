@@ -1,16 +1,23 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"io"
 	"io/ioutil"
 	"log"
 	"net"
 	"os"
-	"time"
+	"sync"
 
-	"github.com/miekg/dns"
 	"gopkg.in/yaml.v2"
+
+	"github.com/Azure/azure-sdk-for-go/profiles/latest/dns/mgmt/dns"
+
+	"github.com/Azure/go-autorest/autorest"
+	"github.com/Azure/go-autorest/autorest/azure"
+	"github.com/Azure/go-autorest/autorest/azure/auth"
+	"github.com/Azure/go-autorest/autorest/to"
 )
 
 func chooseUnicast(a []net.Addr) []*net.IPNet {
@@ -74,22 +81,17 @@ func (i *IP) ApplyIPToMask(ip net.IP) net.IP {
 	return newIp
 }
 
-func (i *IP) Is4() bool {
-	return i.ip.To4() != nil
-}
-
-func joinDomain(part, fqdn string) string {
-	if part == "@" {
-		return dns.Fqdn(fqdn)
-	}
-	return dns.Fqdn(dns.Fqdn(part) + fqdn)
+type AzureConfig struct {
+	ClientID       string `yaml:"clientId"`
+	ClientSecret   string `yaml:"clientSecret"`
+	TenantID       string `yaml:"tenantId"`
+	SubscriptionID string `yaml:"subscriptionId"`
+	ResourceGroup  string `yaml:"resourceGroup"`
 }
 
 type Config struct {
-	Server      string            `yaml:"server"`
-	Zone        string            `yaml:"zone"`
-	Key         string            `yaml:"key"`
-	TsigSecrets map[string]string `yaml:"secrets"`
+	AzureConfig AzureConfig `yaml:"azure"`
+	Zone        string      `yaml:"zone"`
 	Hosts       map[string]IP
 	Ttl         uint32 `yaml:"ttl"`
 }
@@ -101,6 +103,71 @@ func (dn *DevNull) Write(p []byte) (int, error) {
 }
 func (dn *DevNull) Close() error {
 	return nil
+}
+
+func (i *IP) Is4() bool {
+	return i.ip.To4() != nil
+}
+
+/* Azure */
+type azureDnsUpdater struct {
+	logger        *log.Logger
+	dnsClient     dns.RecordSetsClient
+	resourceGroup string
+	zone          string
+	wg            sync.WaitGroup
+}
+
+func (a *azureDnsUpdater) SetARecord(host string, ip net.IP) {
+	a.wg.Add(1)
+	go func() {
+		_, err := a.dnsClient.CreateOrUpdate(context.Background(), a.resourceGroup, a.zone, host, "A", dns.RecordSet{
+			RecordSetProperties: &dns.RecordSetProperties{
+				TTL: to.Int64Ptr(300),
+				ARecords: &[]dns.ARecord{
+					dns.ARecord{
+						Ipv4Address: to.StringPtr(ip.String()),
+					},
+				},
+			},
+		}, "", "")
+		if err != nil {
+			a.logger.Print("Error updating ", host, ": ", err)
+		}
+		a.wg.Done()
+	}()
+}
+func (a *azureDnsUpdater) SetAAAARecord(host string, ip net.IP) {
+	a.wg.Add(1)
+	go func() {
+		_, err := a.dnsClient.CreateOrUpdate(context.Background(), a.resourceGroup, a.zone, host, "AAAA", dns.RecordSet{
+			RecordSetProperties: &dns.RecordSetProperties{
+				TTL: to.Int64Ptr(300),
+				AaaaRecords: &[]dns.AaaaRecord{
+					dns.AaaaRecord{
+						Ipv6Address: to.StringPtr(ip.String()),
+					},
+				},
+			},
+		}, "", "")
+		if err != nil {
+			a.logger.Print("Error updating ", host, ": ", err)
+		}
+		a.wg.Done()
+	}()
+}
+func (a *azureDnsUpdater) Wait() {
+	a.wg.Wait()
+}
+func newAzureDnsUpdater(logger *log.Logger, authorizer autorest.Authorizer, subscription string, resourceGroup string, zone string) *azureDnsUpdater {
+	dnsClient := dns.NewRecordSetsClient(subscription)
+	dnsClient.Authorizer = authorizer
+	return &azureDnsUpdater{
+		logger:        logger,
+		dnsClient:     dnsClient,
+		resourceGroup: resourceGroup,
+		zone:          zone,
+	}
 }
 
 func main() {
@@ -151,34 +218,37 @@ func main() {
 		}
 	}
 
-	c := &dns.Client{}
-	c.SingleInflight = true
-	c.TsigSecret = config.TsigSecrets
+	azureAuthSettings := auth.EnvironmentSettings{
+		Values: map[string]string{
+			auth.ClientID:     config.AzureConfig.ClientID,
+			auth.ClientSecret: config.AzureConfig.ClientSecret,
+			auth.TenantID:     config.AzureConfig.TenantID,
+			auth.Resource:     azure.PublicCloud.ResourceManagerEndpoint,
+		},
+		Environment: azure.PublicCloud,
+	}
+	authorizer, err := azureAuthSettings.GetAuthorizer()
+	if err != nil {
+		log.Fatal("Failed to authenticate to Azure: ", err)
+	}
 
-	insertions := make([]dns.RR, 0, len(config.Hosts))
+	updater := newAzureDnsUpdater(logger, authorizer, config.AzureConfig.SubscriptionID, config.AzureConfig.ResourceGroup, config.Zone)
+
 	for host, ip := range config.Hosts {
-		fqdn := joinDomain(host, config.Zone)
-		insertions = append(insertions, &dns.ANY{dns.RR_Header{fqdn, dns.TypeANY, dns.ClassANY, 0, 0}})
 		if ip.Is4() {
 			finalIp := ip.ApplyIPToMask(four)
-			logger.Printf("Updating %s to (IPv4) %v", fqdn, finalIp)
-			insertions = append(insertions, &dns.A{dns.RR_Header{fqdn, dns.TypeA, dns.ClassINET, config.Ttl, 0}, finalIp})
+			logger.Printf("Updating %s to (IPv4) %v", host, finalIp)
+			updater.SetARecord(host, finalIp)
 		} else {
 			finalIp := ip.ApplyIPToMask(sixPrefix)
-			logger.Printf("Updating %s to (IPv6) %v", fqdn, finalIp)
-			insertions = append(insertions, &dns.AAAA{dns.RR_Header{fqdn, dns.TypeAAAA, dns.ClassINET, config.Ttl, 0}, finalIp})
+			logger.Printf("Updating %s to (IPv6) %v", host, finalIp)
+			updater.SetAAAARecord(host, finalIp)
 		}
 	}
-	insertions = append(insertions, &dns.TXT{dns.RR_Header{dns.Fqdn(config.Zone), dns.TypeTXT, dns.ClassINET, config.Ttl, 0}, []string{time.Now().String()}})
-	updateMsg := &dns.Msg{}
-	updateMsg.SetUpdate(dns.Fqdn(config.Zone))
-	//updateMsg.RemoveName(removals)
-	updateMsg.Ns = insertions
-	updateMsg.SetTsig(config.Key, dns.HmacMD5, 300, time.Now().UTC().Unix())
 
-	reply, _, err := c.Exchange(updateMsg, config.Server)
+	updater.Wait()
 	if err != nil {
-		logger.Print(reply)
+		//logger.Print(reply)
 		logger.Fatal("Failed to update DNS sever:", err)
 	}
 
