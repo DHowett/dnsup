@@ -1,15 +1,17 @@
-# Dynamic DNS Updater
+# Azure Dynamic DNS Updater
 
-Pulls IPs from interfaces, joins them with partial IPs specified in the config file, and sends a RFC 2136-compliant update to a specified server.
+Pulls IPs from interfaces, joins them with partial IPs specified in the config file, and sends them off to Azure DNS.
 
 # Config File
 
 ```
-server: "ipaddr:53"
+azure:
+        clientId: a-client-id
+	clientSecret: a-client-secret
+	tenantId: a-tenant-id
+	subscriptionId: a-subscription-id
+	resourceGroup: YourResourceGroup
 zone: "fully.qualified.update.zone."
-key: "update.key."
-secrets:
-        "update.key.": "update.secret."
 hosts:
         "host1": "::1234:1234:1234:1234/64"
         "host2": "::def0:dea:dbee:f000/64"
@@ -22,6 +24,9 @@ As in BIND, `@` is shorthand for the root of the zone.
 
 While the host entries look like CIDR notation, they truly specify the prefix of the interface IP to merge with.
 That is to say, `0.0.0.9/24` + `1.2.3.4` yields `1.2.3.9`.
+
+It is recommended that you create a new AD Service Principal and grant it DNS Zone Contributor access to the zone you
+intend to update. It needs no other permissions.
 
 # Example Scenario
 
