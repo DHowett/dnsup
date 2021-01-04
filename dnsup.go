@@ -45,11 +45,15 @@ func chooseFour(in []*net.IPNet) net.IP {
 	return nil
 }
 
-func chooseSix(in []*net.IPNet) net.IP {
+func chooseSix(in []*net.IPNet, mask *net.IPMask) net.IP {
 	for _, inet := range in {
 		v4 := inet.IP.To4()
 		if v4 == nil {
-			return inet.IP.Mask(inet.Mask)
+			applicableMask := inet.Mask
+			if mask != nil {
+				applicableMask = *mask
+			}
+			return inet.IP.Mask(applicableMask)
 		}
 	}
 	return nil
@@ -172,10 +176,12 @@ func newAzureDnsUpdater(logger *log.Logger, authorizer autorest.Authorizer, subs
 
 func main() {
 	var fourFrom, sixFrom, configFile, logFile string
+	var prefixLen6 int
 	flag.StringVar(&fourFrom, "4", "eth0", "pull ipv4 address from")
 	flag.StringVar(&sixFrom, "6", "br0", "pull ipv6 address from")
 	flag.StringVar(&configFile, "config", "dnsup.yml", "config file (yaml)")
 	flag.StringVar(&logFile, "log", "", "log file")
+	flag.IntVar(&prefixLen6, "prefixlen6", 0, "prefix length on -6 (overrides value on interface)")
 	flag.Parse()
 
 	var logWriter io.WriteCloser = &DevNull{}
@@ -200,6 +206,14 @@ func main() {
 	}
 
 	var four, sixPrefix net.IP
+	var maskOverrideSix *net.IPMask
+	if prefixLen6 != 0 {
+		if prefixLen6 > 64 {
+			logger.Fatal("Too many bits specified in v6 prefix")
+		}
+		mask := net.CIDRMask(prefixLen6, 128)
+		maskOverrideSix = &mask
+	}
 
 	ifs, err := net.Interfaces()
 	if err != nil {
@@ -214,7 +228,7 @@ func main() {
 			four = chooseFour(chooseUnicast(addrs))
 		}
 		if iface.Name == sixFrom {
-			sixPrefix = chooseSix(chooseUnicast(addrs))
+			sixPrefix = chooseSix(chooseUnicast(addrs), maskOverrideSix)
 		}
 	}
 
